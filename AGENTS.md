@@ -1,0 +1,1 @@
+../../../../agent-setting/generated/projects/PalModTools-CS/AGENTS.md
