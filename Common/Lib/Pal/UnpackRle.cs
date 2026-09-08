@@ -25,7 +25,11 @@ namespace Lib.Pal;
 
 public static unsafe partial class PalUtil
 {
-    public static (nint, int) UnpackRle(nint src)
+    public static (nint, int) UnpackRle(nint src) => UnpackRle(src, 0xFF);
+
+    // The fill value permits callers to recover skip coverage without treating
+    // an opaque palette index (including 0 or 255) as a transparent color key.
+    public static (nint, int) UnpackRle(nint src, byte background)
     {
         int         width, height, pixelsDecoded, len;
         byte        count;
@@ -50,9 +54,8 @@ public static unsafe partial class PalUtil
         width = ((ushort*)pSrc)[0];
         height = ((ushort*)pSrc)[1];
         len = width * height;
-        len = width * height;
         dest = C.malloc(len);
-        C.memset(dest, 0xFF, len);
+        C.memset(dest, background, len);
         pPixels = (byte*)dest;
 
         //

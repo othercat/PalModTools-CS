@@ -1,5 +1,7 @@
 # SDLPal-CS
 # 使用 C# .NET 10 实现的经典中国游戏 PAL 的 mod 开发和调试工具
+
+独立图片拆解入口：[AssetExport](../AssetExport/README.md)。按明确 MKF/PAT 参数导出原尺寸 RGBA PNG，保留来源哈希；无需启动完整 ModTools 界面。
 ## 功能概述：
 1. Mod 解打包工具使用 C# .NET 10 + Avalonia 开发
 

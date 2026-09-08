@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>PalAssetExport</AssemblyName>
+    <PublishAot>false</PublishAot>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishSingleFile>false</PublishSingleFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../Common/Lib/Pal/MkfReader.cs" Link="Shared/MkfReader.cs" />
+    <Compile Include="../Common/Lib/Pal/FileReader.cs" Link="Shared/FileReader.cs" />
+    <Compile Include="../Common/Lib/Pal/UnpackBounded.cs" Link="Shared/UnpackBounded.cs" />
+    <Compile Include="../Common/Lib/Pal/UnpackDos.cs" Link="Shared/UnpackDos.cs" />
+    <Compile Include="../Common/Lib/Pal/UnpackWin.cs" Link="Shared/UnpackWin.cs" />
+    <Compile Include="../Common/Lib/Pal/UnpackRle.cs" Link="Shared/UnpackRle.cs" />
+    <Compile Include="../Common/SimpleUtility/C.cs" Link="Shared/C.cs" />
+  </ItemGroup>
+</Project>

@@ -85,7 +85,7 @@ public static unsafe partial class PalUtil
         {
             temp = node + 1;
 
-            while (node->weight == temp->weight)
+            while (temp <= tree.node + 0x280 && node->weight == temp->weight)
                 temp++;
 
             temp--;
@@ -135,16 +135,10 @@ public static unsafe partial class PalUtil
         TreeNodeWin**       list;
         TreeNodeWin*        node;
 
-        if ((tree->list = list = (TreeNodeWin**)C.malloc(sizeof(TreeNodeWin*) * 321)) == null)
-        {
-            goto Failed;
-        }
-
-        if ((tree->node = node = (TreeNodeWin*)C.malloc(sizeof(TreeNodeWin) * 641)) == null)
-        {
-            C.free(list);
-            goto Failed;
-        }
+        // UnpackWin owns both allocations, including partial construction when
+        // the allocator throws. Its finally block releases them exactly once.
+        tree->list = list = (TreeNodeWin**)C.malloc(sizeof(TreeNodeWin*) * 321);
+        tree->node = node = (TreeNodeWin*)C.malloc(sizeof(TreeNodeWin) * 641);
 
         for (i = 0; i <= 0x140; i++)
         {
@@ -167,13 +161,6 @@ public static unsafe partial class PalUtil
             node[ptr].weight = (ushort)(node[i].weight + node[i + 1].weight);
         }
 
-        return;
-
-    Failed:
-        S.Failed(
-           "Util.BuildTreeWin",
-           "The Huffman tree construction failed!"
-        );
     }
 
     /// <summary>
@@ -182,7 +169,12 @@ public static unsafe partial class PalUtil
     /// <param name="data">字节流</param>
     /// <param name="pos">要获取字节流中的第几位 bit</param>
     /// <returns>bit 值</returns>
-    static int GetBitWin(byte* data, uint pos) => data[pos / 8] >> (int)(pos % 8) & 1;
+    static int GetBitWin(byte* data, uint pos, int sourceLength)
+    {
+        if (sourceLength >= 0 && pos / 8 >= sourceLength)
+            throw new FormatException("Truncated YJ2 bit stream.");
+        return data[pos / 8] >> (int)(pos % 8) & 1;
+    }
 
     static int GetDecompressSizeWin(nint source) => *(int*)source;
 
@@ -191,23 +183,25 @@ public static unsafe partial class PalUtil
     /// </summary>
     /// <param name="source">源二进制流</param>
     /// <returns>解码后的二进制流和流长度</returns>
-    static (nint, int) UnpackWin(nint source)
+    static (nint, int) UnpackWin(nint source) => UnpackWin(source, -1, int.MaxValue);
+
+    // Callers importing a file must supply the actual chunk length and budget.
+    static (nint, int) UnpackWin(nint source, int sourceLength, int outputLimit)
     {
-        int                 Length;
+        if (source == 0 || sourceLength < -1 || (sourceLength >= 0 && sourceLength < 4))
+            throw new FormatException("Truncated YJ2 file header.");
+        int Length = GetDecompressSizeWin(source);
+        if (Length < 1 || Length > outputLimit) throw new FormatException("Invalid YJ2 output size.");
+        int bitBytes = sourceLength < 0 ? -1 : sourceLength - 4;
         uint                len = 0, ptr = 0;
-        nint                destination;
+        nint                destination = 0;
         byte*               src = (byte*)source + 4;
         byte*               dest;
-        TreeWin             tree;
+        TreeWin             tree = default;
         TreeNodeWin*        node;
-
-        S.Failed(
-            "Util.UnpakWin",
-            "The source data 'Source' is a null pointer",
-            source != 0
-        );
-
-        Length = GetDecompressSizeWin(source);
+        bool completed = false;
+        try
+        {
         destination = C.malloc(Length);
         dest = (byte*)destination;
 
@@ -219,7 +213,7 @@ public static unsafe partial class PalUtil
             node = tree.node + 0x280;
             while (node->value > 0x140)
             {
-                if (GetBitWin(src, ptr) != 0)
+                if (GetBitWin(src, ptr, bitBytes) != 0)
                     node = node->right;
                 else
                     node = node->left;
@@ -242,14 +236,17 @@ public static unsafe partial class PalUtil
                 uint temp, tmp, pos;
                 byte* pre;
                 for (i = 0, temp = 0; i < 8; i++, ptr++)
-                    temp |= (uint)GetBitWin(src, ptr) << i;
+                    temp |= (uint)GetBitWin(src, ptr, bitBytes) << i;
                 tmp = temp & 0xff;
                 for (; i < data2Win[(int)(tmp & 0xf)] + 6; i++, ptr++)
-                    temp |= (uint)GetBitWin(src, ptr) << i;
+                    temp |= (uint)GetBitWin(src, ptr, bitBytes) << i;
                 temp >>= data2Win[(int)(tmp & 0xf)];
                 pos = (temp & 0x3f) | ((uint)data1Win[(int)tmp] << 6);
                 if (pos == 0xfff)
                     break;
+                int count = val - 0xfd;
+                if (pos >= len || count > Length - len)
+                    throw new FormatException("Invalid YJ2 back-reference.");
                 pre = dest - pos - 1;
                 for (i = 0; i < val - 0xfd; i++)
                     *dest++ = *pre++;
@@ -257,14 +254,22 @@ public static unsafe partial class PalUtil
             }
             else
             {
+                if (len >= Length) throw new FormatException("YJ2 literal exceeds the output size.");
                 *dest++ = (byte)val;
                 len++;
             }
         }
 
-        C.free(tree.list);
-        C.free(tree.node);
-
-        return (destination, Length);
+        // Filling the output without the terminator is not a complete stream.
+        if (len != Length) throw new FormatException("YJ2 output is incomplete at the terminator.");
+        completed = true;
+        return (destination, checked((int)len));
+        }
+        finally
+        {
+            C.free(tree.list);
+            C.free(tree.node);
+            if (!completed) C.free(destination);
+        }
     }
 }

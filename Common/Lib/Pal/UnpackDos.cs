@@ -28,6 +28,7 @@
 #endregion License
 
 using SimpleUtility;
+using System;
 using System.Runtime.InteropServices;
 
 namespace Lib.Pal;
@@ -68,8 +69,14 @@ public static unsafe partial class PalUtil
         public  fixed   byte        CodeCountTable[2];
     }
 
-    static int Yj1_get_bits(void *src, int *bitptr, int count)
+    static int Yj1_get_bits(void *src, int *bitptr, int count, int sourceLength = -1)
     {
+        if (count is < 0 or > 16) throw new FormatException("Invalid YJ1 bit width.");
+        if (count == 0) return 0;
+        int offset = (*bitptr >> 4) << 1;
+        int required = count > 16 - (*bitptr & 15) ? 4 : 2;
+        if (sourceLength >= 0 && (offset < 0 || offset > sourceLength - required))
+            throw new FormatException("Truncated YJ1 bit stream.");
         byte        *temp = ((byte*)src) + ((* bitptr >> 4) << 1);
         int         mask;
         byte        bptr = (byte)(*bitptr & 0xf);
@@ -84,27 +91,27 @@ public static unsafe partial class PalUtil
             return (ushort)(((ushort)((temp[0] | (temp[1] << 8)) << bptr)) >> (16 - count));
     }
 
-    static ushort Yj1_get_loop(void* src, int* bitptr, YJ_1_BLOCKHEADER* header)
+    static ushort Yj1_get_loop(void* src, int* bitptr, YJ_1_BLOCKHEADER* header, int sourceLength = -1)
     {
-        if (Yj1_get_bits(src, bitptr, 1) != 0)
+        if (Yj1_get_bits(src, bitptr, 1, sourceLength) != 0)
             return header->CodeCountTable[0];
         else
         {
-            int temp = Yj1_get_bits(src, bitptr, 2);
+            int temp = Yj1_get_bits(src, bitptr, 2, sourceLength);
             if (temp != 0)
-                return (ushort)Yj1_get_bits(src, bitptr, header->CodeCountCodeLengthTable[temp - 1]);
+                return (ushort)Yj1_get_bits(src, bitptr, header->CodeCountCodeLengthTable[temp - 1], sourceLength);
             else
                 return header->CodeCountTable[1];
         }
     }
 
-    static ushort Yj1_get_count(void* src, int* bitptr, YJ_1_BLOCKHEADER* header)
+    static ushort Yj1_get_count(void* src, int* bitptr, YJ_1_BLOCKHEADER* header, int sourceLength = -1)
     {
         ushort temp;
-        if ((temp = (ushort)Yj1_get_bits(src, bitptr, 2)) != 0)
+        if ((temp = (ushort)Yj1_get_bits(src, bitptr, 2, sourceLength)) != 0)
         {
-            if (Yj1_get_bits(src, bitptr, 1) != 0)
-                return (ushort)Yj1_get_bits(src, bitptr, header->LZSSRepeatCodeLengthTable[temp - 1]);
+            if (Yj1_get_bits(src, bitptr, 1, sourceLength) != 0)
+                return (ushort)Yj1_get_bits(src, bitptr, header->LZSSRepeatCodeLengthTable[temp - 1], sourceLength);
             else
                 return header->LZSSRepeatTable[temp];
         }
@@ -117,114 +124,116 @@ public static unsafe partial class PalUtil
     /// </summary>
     /// <param name="source">源二进制流</param>
     /// <returns>解码后的二进制流和流长度</returns>
-    static (nint, int) UnpackDos(nint source)
+    static (nint, int) UnpackDos(nint source) => UnpackDos(source, -1, int.MaxValue);
+
+    // The legacy pointer-only entry cannot prove input bounds. File importers
+    // must supply the chunk length and their output allocation budget.
+    static (nint, int) UnpackDos(nint source, int sourceLength, int outputLimit)
     {
-        YJ_1_FILEHEADER*        hdr = (YJ_1_FILEHEADER*)source;
-        nint                    destination;
-        byte*                   src = (byte*)source;
-        byte*                   dest;
-        uint                    i;
-        YJ1_TreeNode*           root, node;
-
-        S.Failed(
-            "Util.UnpackDos",
-            "源数据缓冲区为空",
-            source != 0
-        );
-
-        S.Failed(
-            "Util.UnpackDos",
-            "源数据缓冲区头部标识错误，期望为 \"YJ_1\"",
-            hdr->Signature == 0x315f4a59
-        );
-
-        do
+        if (source == 0 || sourceLength < -1 || (sourceLength >= 0 && sourceLength < 16))
+            throw new FormatException("Truncated YJ1 file header.");
+        var hdr = (YJ_1_FILEHEADER*)source;
+        if (hdr->Signature != 0x315f4a59 || hdr->UncompressedLength < 1 || hdr->UncompressedLength > outputLimit)
+            throw new FormatException("Invalid YJ1 signature or output size.");
+        if (sourceLength >= 0)
         {
-            ushort tree_len = (ushort)(hdr->HuffmanTreeLength * 2);
+            if (hdr->CompressedLength < 16 || hdr->CompressedLength > sourceLength)
+                throw new FormatException("Invalid YJ1 compressed length.");
+            sourceLength = hdr->CompressedLength;
+        }
+        var src = (byte*)source;
+        int treeLength = hdr->HuffmanTreeLength * 2;
+        int flagLength = ((treeLength + 15) >> 4) * 2;
+        int treeEnd = 16 + treeLength + flagLength;
+        if (sourceLength >= 0 && treeEnd > sourceLength)
+            throw new FormatException("Truncated YJ1 Huffman table.");
+        YJ1_TreeNode* root = null;
+        nint destination = 0;
+        bool completed = false;
+        try
+        {
+            root = (YJ1_TreeNode*)C.malloc(sizeof(YJ1_TreeNode) * (treeLength + 1));
+            root[0].left = treeLength >= 2 ? root + 1 : null;
+            root[0].right = treeLength >= 2 ? root + 2 : null;
             int bitptr = 0;
-            byte *flag = src + 16 + tree_len;
-
-            node = root = (YJ1_TreeNode*)C.malloc(sizeof(YJ1_TreeNode) * (tree_len + 1));
-
-            root[0].leaf = false;
-            root[0].value = 0;
-            root[0].left = root + 1;
-            root[0].right = root + 2;
-            for (i = 1; i <= tree_len; i++)
+            byte* flag = src + 16 + treeLength;
+            for (int i = 1; i <= treeLength; i++)
             {
-                root[i].leaf = Yj1_get_bits(flag, &bitptr, 1) == 0;
+                root[i].leaf = Yj1_get_bits(flag, &bitptr, 1, flagLength) == 0;
                 root[i].value = src[15 + i];
-                if (root[i].leaf)
-                    root[i].left = root[i].right = null;
-                else
+                if (!root[i].leaf)
                 {
-                    root[i].left = root + (root[i].value << 1) + 1;
+                    int child = (root[i].value << 1) + 1;
+                    if (child + 1 > treeLength) throw new FormatException("YJ1 Huffman child is outside the table.");
+                    root[i].left = root + child;
                     root[i].right = root[i].left + 1;
                 }
             }
-            src += 16 + tree_len + ((((tree_len & 0xf) != 0) ? (tree_len >> 4) + 1 : (tree_len >> 4)) << 1);
-        } while (false);
-
-        dest = (byte*)(destination = C.malloc(hdr->UncompressedLength));
-
-        for (i = 0; i < hdr->BlockCount; i++)
-        {
-            int bitptr;
-            YJ_1_BLOCKHEADER* header;
-
-            header = (YJ_1_BLOCKHEADER*)src;
-            src += 4;
-            if (header->CompressedLength == 0)
+            src += treeEnd;
+            destination = C.malloc(hdr->UncompressedLength);
+            var dest = (byte*)destination;
+            for (int i = 0; i < hdr->BlockCount; i++)
             {
-                ushort hul = header->UncompressedLength;
-                while (hul-- > 0)
+                long offset = src - (byte*)source;
+                if (sourceLength >= 0 && offset > sourceLength - 4)
+                    throw new FormatException("Truncated YJ1 block header.");
+                var header = (YJ_1_BLOCKHEADER*)src;
+                int blockOutput = header->UncompressedLength;
+                int blockBytes = header->CompressedLength == 0 ? blockOutput + 4 : header->CompressedLength;
+                if (sourceLength >= 0 && blockBytes > sourceLength - offset)
+                    throw new FormatException("Truncated YJ1 block.");
+                if (blockOutput > hdr->UncompressedLength - (dest - (byte*)destination))
+                    throw new FormatException("YJ1 block exceeds the output size.");
+                var blockStart = dest;
+                src += 4;
+                if (header->CompressedLength == 0)
                 {
-                    *dest++ = *src++;
+                    for (int j = 0; j < blockOutput; j++) *dest++ = *src++;
+                    continue;
                 }
-                continue;
-            }
-            src += 20;
-            bitptr = 0;
-            for (; ; )
-            {
-                ushort loop;
-                if ((loop = Yj1_get_loop(src, &bitptr, header)) == 0)
-                    break;
-
-                while (loop-- > 0)
+                if (blockBytes < 24 || treeLength < 2)
+                    throw new FormatException("Invalid YJ1 compressed block or Huffman table.");
+                src += 20;
+                int bitBytes = blockBytes - 24;
+                bitptr = 0;
+                for (;;)
                 {
-                    node = root;
-                    for (; !node->leaf;)
+                    int loop = Yj1_get_loop(src, &bitptr, header, bitBytes);
+                    if (loop == 0) break;
+                    if (loop > blockOutput - (dest - blockStart))
+                        throw new FormatException("YJ1 literal run exceeds its block.");
+                    while (loop-- > 0)
                     {
-                        if (Yj1_get_bits(src, &bitptr, 1) != 0)
-                            node = node->right;
-                        else
-                            node = node->left;
+                        var node = root;
+                        int depth = 0;
+                        while (!node->leaf)
+                        {
+                            if (++depth > treeLength) throw new FormatException("Cyclic YJ1 Huffman table.");
+                            node = Yj1_get_bits(src, &bitptr, 1, bitBytes) != 0 ? node->right : node->left;
+                        }
+                        *dest++ = node->value;
                     }
-                    *dest++ = node->value;
-                }
-
-                if ((loop = Yj1_get_loop(src, &bitptr, header)) == 0)
-                    break;
-
-                while (loop-- > 0)
-                {
-                    uint pos, count;
-                    count = Yj1_get_count(src, &bitptr, header);
-                    pos = (uint)Yj1_get_bits(src, &bitptr, 2);
-                    pos = (uint)Yj1_get_bits(src, &bitptr, header->LZSSOffsetCodeLengthTable[pos]);
-                    while (count-- > 0)
+                    loop = Yj1_get_loop(src, &bitptr, header, bitBytes);
+                    if (loop == 0) break;
+                    while (loop-- > 0)
                     {
-                        *dest = *(dest - pos);
-                        dest++;
+                        int count = Yj1_get_count(src, &bitptr, header, bitBytes);
+                        int selector = Yj1_get_bits(src, &bitptr, 2, bitBytes);
+                        int pos = Yj1_get_bits(src, &bitptr, header->LZSSOffsetCodeLengthTable[selector], bitBytes);
+                        if (count > blockOutput - (dest - blockStart) || (count > 0 && (pos < 1 || pos > dest - (byte*)destination)))
+                            throw new FormatException("Invalid YJ1 back-reference.");
+                        // Overlapping copies may also refer to an earlier block.
+                        while (count-- > 0) { *dest = *(dest - pos); dest++; }
                     }
                 }
+                if (dest - blockStart != blockOutput) throw new FormatException("YJ1 block output is incomplete.");
+                src = (byte*)header + blockBytes;
             }
-            src = ((byte*)header) + header->CompressedLength;
+            int written = checked((int)(dest - (byte*)destination));
+            if (written != hdr->UncompressedLength) throw new FormatException("YJ1 file output is incomplete.");
+            completed = true;
+            return (destination, written);
         }
-
-        C.free(root);
-
-        return (destination, hdr->UncompressedLength);
+        finally { C.free(root); if (!completed) C.free(destination); }
     }
 }
