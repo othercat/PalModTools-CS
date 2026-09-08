@@ -74,12 +74,16 @@ public sealed record ResourceInput(string Path, string Sha256, int Chunk, byte[]
         if (source.Length < 4) throw new FormatException("Truncated sprite table.");
         var count = BinaryPrimitives.ReadUInt16LittleEndian(source);
         if (count is < 1 or > 257 || count * 2 > source.Length) throw new FormatException("Invalid sprite table length.");
+        // Some DATA #9 groups end with a zero table entry. It terminates the table,
+        // not the preceding image; internal zeros still fail the normal range checks.
+        var zeroSentinel = count > 1 && BinaryPrimitives.ReadUInt16LittleEndian(source.AsSpan((count - 1) * 2, 2)) == 0;
+        var frameCount = zeroSentinel ? count - 1 : count;
         var result = new List<byte[]>();
-        for (var i = 0; i < count; i++)
+        for (var i = 0; i < frameCount; i++)
         {
             var start = BinaryPrimitives.ReadUInt16LittleEndian(source.AsSpan(i * 2, 2)) * 2;
-            var end = i + 1 < count ? BinaryPrimitives.ReadUInt16LittleEndian(source.AsSpan((i + 1) * 2, 2)) * 2 : source.Length;
-            if (i == count - 1 && start == source.Length) break; // An actual terminal offset, not an assumed extra frame.
+            var end = i + 1 < frameCount ? BinaryPrimitives.ReadUInt16LittleEndian(source.AsSpan((i + 1) * 2, 2)) * 2 : source.Length;
+            if (!zeroSentinel && i == count - 1 && start == source.Length) break; // An actual terminal offset, not an assumed extra frame.
             if (start < count * 2 || start >= source.Length || end <= start || end > source.Length)
                 throw new FormatException("Unsupported or invalid sprite frame offsets.");
             if (result.Count == 256) throw new FormatException("Sprite exceeds the 256-frame import budget.");
